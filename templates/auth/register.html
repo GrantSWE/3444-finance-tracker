@@ -70,11 +70,11 @@ Register | Finance Tracker
                     <p>Enter your information below to start tracking your finances.</p>
                 </div>
 
-                <form action="#" method="POST">
+                <form action="{{ url_for('register') }}" method="POST">
 
                     <div class="form-group">
-                        <label for="name" class="form-label">Full Name</label>
-                        <input type="text" id="name" name="name" class="form-input" placeholder="John Doe"
+                        <label for="full_name" class="form-label">Full Name</label>
+                        <input type="text" id="full_name" name="full_name" class="form-input" placeholder="John Doe"
                             autocomplete="name" maxlength="80" required>
                     </div>
 
