@@ -1,6 +1,6 @@
 import os
 import sqlite3
-
+from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for, session
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -28,7 +28,20 @@ def init_db():
                 password TEXT NOT NULL
             )
         """)
-
+        conn.commit()
+        
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL
+                type TEXT CHECK(type IN ('income', 'expense', 'transafer')) NOT NULL,
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                description TEXT,
+                source_account TEXT NOT NULL,
+                destination_account TEXT -- Used primarily for tranferrals
+            )
+        """)
         conn.commit()
 
 
@@ -157,9 +170,31 @@ def dashboard():
     if "user" not in session:
         return redirect(url_for("login"))
 
-    return "<h1>Dahsboard coming soon.</h1>"
-    #return render_template("dashboard/dashboard.html")
+def add_transaction(type, amount, category, source_account, destination_account=None, description=None, date=None, db_name="finance_tracker.db"):
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        INSERT INTO transactions (date, name, amount, category, description, source_account, destination_account)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (date, type.lower(), amount, category, description, source_account, destination_account))
+    
+    conn.commit()
+    conn.close()
+    print(f"Successfully recorder {type}: ${amount:.2f} ({category})")
 
+def get_all_transactions():
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    
+    cursor.execute( "SELECT * FROM transactions ORDER BY date DESC")
+
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+    
 
 @app.route("/logout")
 def logout():
