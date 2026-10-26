@@ -1,0 +1,112 @@
+{% extends "layouts/base.html" %}
+
+{% block styles %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/auth.css') }}">
+{% endblock %}
+
+{% block title %}
+Log In | Finance Tracker
+{% endblock %}
+
+{% block content %}
+
+<section class="auth-container">
+
+    <div class="auth-grid auth-grid--login">
+
+        <div class="auth-grid__left">
+
+            <div class="auth-intro">
+                <span class="eyebrow">Welcome back</span>
+
+                <h1>Small habits today create a stronger tomorrow.</h1>
+
+                <p>
+                    Sign in to review your progress, update your finances,
+                    and keep moving toward the goals that matter to you.
+                </p>
+            </div>
+
+            <div class="auth-info-box">
+
+                <article class="ibox">
+                    <div class="ibox-icon" aria-hidden="true">$</div>
+
+                    <div>
+                        <h3>Know where you stand</h3>
+                        <p>Return to a clear view of your income, expenses, and current balance.</p>
+                    </div>
+                </article>
+
+                <article class="ibox">
+                    <div class="ibox-icon" aria-hidden="true">✓</div>
+
+                    <div>
+                        <h3>Keep your plans on track</h3>
+                        <p>Check your budgets regularly and adjust before small changes become surprises.</p>
+                    </div>
+                </article>
+
+                <article class="ibox">
+                    <div class="ibox-icon" aria-hidden="true">↑</div>
+
+                    <div>
+                        <h3>Build on your progress</h3>
+                        <p>Every update gives you a clearer picture of how far you have come.</p>
+                    </div>
+                </article>
+
+            </div>
+
+        </div>
+
+        <div class="auth-grid__right">
+
+            <div class="auth-form-card">
+
+                <div class="auth-form-heading">
+                    <span class="eyebrow">Your account</span>
+                    <h2>Log in</h2>
+                    <p>Enter your username and password to continue.</p>
+                </div>
+
+                {% if error %}
+                <div class="form-alert" role="alert">
+                    {{ error }}
+                </div>
+                {% endif %}
+
+                <form action="{{ url_for('login') }}" method="POST">
+
+                    <div class="form-group">
+                        <label for="username" class="form-label">Username</label>
+                        <input type="text" id="username" name="username" class="form-input" placeholder="johndoe"
+                            value="{{ request.form.get('username', '') }}" autocomplete="username" maxlength="30"
+                            required autofocus>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="password" class="form-label">Password</label>
+                        <input type="password" id="password" name="password" class="form-input" placeholder="••••••••"
+                            autocomplete="current-password" maxlength="128" required>
+                    </div>
+
+                    <button class="button button-primary auth-submit" type="submit">
+                        Log In
+                    </button>
+
+                </form>
+
+                <p class="auth-switch">
+                    Need an account? <a href="{{ url_for('register') }}">Create one</a>
+                </p>
+
+            </div>
+
+        </div>
+
+    </div>
+
+</section>
+
+{% endblock %}

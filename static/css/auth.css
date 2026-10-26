@@ -138,6 +138,18 @@
   margin-bottom: 20px;
 }
 
+.form-alert {
+  margin: -6px 0 22px;
+  padding: 12px 14px;
+  border: 1px solid rgba(214, 69, 69, 0.28);
+  border-radius: 8px;
+  color: #a62f2f;
+  background: rgba(214, 69, 69, 0.08);
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
 .form-label {
   display: block;
   margin-bottom: 8px;
