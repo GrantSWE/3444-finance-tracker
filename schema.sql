@@ -1,12 +1,9 @@
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS users (
- user_id INTEGER PRIMARY KEY AUTOINCREMENT,
- username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ username TEXT UNIQUE NOT NULL,
  password_hash TEXT NOT NULL,
- email TEXT UNIQUE,
- parent_user_id INTEGER REFERENCES users(user_id) ON DELETE SET NULL,
- role TEXT NOT NULL DEFAULT 'adult' CHECK(role IN ('adult','child')),
- created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS Accounts (
  account_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,13 +26,13 @@ CREATE TABLE IF NOT EXISTS Saving_Goals (
 );
 CREATE TABLE IF NOT EXISTS Transactions (
  transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
- account_id INTEGER NOT NULL REFERENCES Accounts(account_id) ON DELETE CASCADE,
- transfer_to_account_id INTEGER REFERENCES Accounts(account_id) ON DELETE SET NULL,
- category_id INTEGER REFERENCES Categories(category_id) ON DELETE SET NULL,
- goal_id INTEGER REFERENCES Saving_Goals(goal_id) ON DELETE SET NULL,
- amount NUMERIC NOT NULL CHECK(amount > 0),
- transaction_type TEXT NOT NULL CHECK(transaction_type IN ('Income','Expense','Transfer')),
- transaction_date TEXT NOT NULL, description TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+ user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE
+ title TEXT NOT NULL
+ amount NUMERIC NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'USD',
+ Transaction_type TEXT check(type IN ('income', 'expense')) NOT NULL,
+ category text NOT NULL
+ date TEXT NOT NULL
+ FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_transactions_account_date ON Transactions(account_id, transaction_date);
 CREATE TABLE IF NOT EXISTS Budgets (

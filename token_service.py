@@ -6,80 +6,58 @@ import time
 import os
 import sys
 
-def load_env_file(filepath=".env"):
-    if not os.path.exists(filepath):
-        return
-    with open(filepath, "r" as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, val = line.split("=", 1)
-            os.environ[key.strip()] = val.strip()
-load_env_file()
-
-class TokenService:
-	def __init__(self)
-        fallback_key = "temporary_development_signature_verification_key_string"
-		self.secret_key = os.environ.get("FLASK_SECRET_KEY", fallback_key).encode('utf-8')
-		self.issuer = "finance-tracker-backend"
-	def _base64url_encode(self, data: bytes) -> str:
-        return base64.urlsafe_b64encode(data)l.decode('utf-8').rstrip('=')
+def generate_auth_token(user_id, secret_key, expires_in=3600):
+    payload = {
+        "user_id": user_id,
+        "exp": int(time.time()) + expires_in
+    }
     
-	def _base64url_decode(self, payload: str) -> bytes:
-        rem = len(payload) % 4
-        if rem >0:
-            payload += "=" * (4-rem)
-        return base64.urlsafe_b64decode(payload.decode('utf-8')
-	
-	def generate_token(self, user_id: int, expires_in_seconds:int = 3600) -> str:
-        current_time = int(time.time())
-        header = {"alg": "HS256", "typ": "JWT"}
-        payload = {
-            "iss": self.issuer,
-            "sub": user_id,
-            "iat": current_time,
-            "exp": current_time + expires_in_seconds
-        }
-	
-        encoded_header =  self._base64url_encode(json.dumps(header).encode('utf-8'))
-        encoded_payload = self._base64url_encode(json.dumps(payload).encode('utf-8'))
-	
-        signature_base = f"{encoded_header}.{encoded_payload}".encode('utf-8')
-        signature = hmac.new(self.secret_key, signature_base, hashlib.sha256).digest()
-        encoded_signature = self._base64url_encode(signature)
-	
-        return f"{encoded_header}.{encoded_payload}.{encoded_signature}"
-	
-	def verify_token(self, token: str) -> dict:
-        if not token or token.count('.') != 2:
-            return {"status": "INVALID", "message": "Malformed token structural syntax."}
+    payload_encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    
+    signature = hmac.new(
+        secret_key.encode(),
+        payload_encoded.encode(),
+        hashlib.sha256
+    ).digest()
+    signature_encode = base64.urlsafe_b64encode(signature).decode().rstrip("=")
+    
+    return f"{payload_encoded}.{signature_encode}"
+    
+def verify_auth_token(token, secret_key):
+    try:
+        if not token or "." not in token:
+            return None
+        payload_encoded, signature_encoded = token.split(".", 1)
         
-        try:
-            encoded_header, encoded_payload, encoded_signature = token.split('.')
+        expected_signature = hmac.new(
+           secret_key.encode(),
+           payload_encoded.encode(),
+           hashlib.sha256
+        ).digest()
+        expected_encoded = base64.urlsafe_b64encode(expected_signature).decode()
+        
+        if not hmac.compare_digest(signature_encode, expected_encoded):
+            return None
+        
+        missing_padding = len(payload_encoded) % 4
+        if missing_padding:
+            payload_encoded += "=" * (4 - missing_padding)
             
-            signature_base = f"{encoded_header}.{encoded_payload}".encode('utf-8')
-            expected_signature = hmac.new(self.secret_key, signature_base, hashlib.sha256).digest()
-            actual_signature = self._base64url_decode(encoded_signature)
-            
-            if not hmac.compare_digest(expected_signature, actual_signature)
-                return {"status", "INVALID", "message": "Signature verification failed. Token modified."}
-            
-            payload_data = self._base64url_decode(encoded_payload)
-            payload = json.load(payload_data.decode('utf-8'))
-            
-            current_time = int(time.time())
-            if current_time >= payload.get('exp", 0);
-                return {
-                    "status": "EXPIRED"
-                    "message": f"Token expired at UNIX timestamp {payload.get('exp")}
-                    "user_id": payload.get("sub")
-                }
-            
-            return {
-                "status": "VALID",
-                "message": "Token authentication successful.",
-                "user_id": payload.get("sub")
-            }
-        except Exception as e:
-            return {"status": "ERROR", "message": f"Token verification error: {str(e)}"}
+        payload = json.load(base64.urlsafe_b64decode(payload_encoded.encode()).decode())
+        
+        if int(time.time()) > payload.get("exp", 0):
+            return None
+        return payload
+    except Exception:
+        return None
+
+def generate_recovery_token(email_or_username, secret_key, expires_in=900):
+    payload = {
+        "identity": email_or_username,
+        "action": "password_recovery",
+        "exp": int(time.time()) + expires_in
+    }
+    payload_encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode*(.rstrip("=")
+    signature = hmac.new(secret_key.encode(), payload_encode.encode(), hashlib.sha256).digest()
+    signature_encoded = base64.urlsafe_b64encode(signature).decode().rstrip("=")
+    return f"{payload_encoded}.{signature_encoded}"
