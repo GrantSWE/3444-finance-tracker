@@ -1,6 +1,8 @@
 import os
 import smtplib
 import sqlite3
+from datetime import date as date_value
+from decimal import Decimal, InvalidOperation
 from email.mime.text import MIMEText
 from functools import wraps
 
@@ -57,12 +59,128 @@ def login_required(view):
     @wraps(view)
     def decorated_function(*args, **kwargs):
         if "user_id" not in session:
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "Authentication required."}), 401
             return redirect(url_for("login"))
 
         g.current_user_id = session["user_id"]
         return view(*args, **kwargs)
 
     return decorated_function
+
+
+def transaction_to_dict(transaction):
+    return dict(transaction)
+
+
+def validate_transaction_payload(payload, partial=False):
+    if not isinstance(payload, dict):
+        return None, "Request body must contain a JSON object."
+
+    editable_fields = {
+        "account_id",
+        "title",
+        "description",
+        "amount",
+        "type",
+        "category",
+        "date",
+    }
+    supplied_fields = editable_fields.intersection(payload)
+
+    if partial and not supplied_fields:
+        return None, "Provide at least one transaction field to update."
+
+    if not partial:
+        required_fields = {"title", "amount", "type", "category", "date"}
+        missing_fields = sorted(
+            field
+            for field in required_fields
+            if field not in payload or payload[field] in (None, "")
+        )
+        if missing_fields:
+            return None, f"Missing required fields: {', '.join(missing_fields)}."
+
+    values = {}
+
+    for field in ("title", "category"):
+        if field in payload:
+            value = payload[field]
+            if not isinstance(value, str) or not value.strip():
+                return None, f"{field} must be a non-empty string."
+            values[field] = value.strip()
+
+    if "description" in payload:
+        description = payload["description"]
+        if description is not None and not isinstance(description, str):
+            return None, "description must be a string or null."
+        values["description"] = description.strip() if description else None
+
+    if "amount" in payload:
+        if isinstance(payload["amount"], bool):
+            return None, "amount must be a positive number."
+        try:
+            amount = Decimal(str(payload["amount"]))
+        except (InvalidOperation, ValueError):
+            return None, "amount must be a positive number."
+        if not amount.is_finite() or amount <= 0:
+            return None, "amount must be a positive number."
+        values["amount"] = float(amount)
+
+    if "type" in payload:
+        transaction_type = payload["type"]
+        if not isinstance(transaction_type, str):
+            return None, "type must be either income or expense."
+        transaction_type = transaction_type.strip().lower()
+        if transaction_type not in {"income", "expense"}:
+            return None, "type must be either income or expense."
+        values["type"] = transaction_type
+
+    if "date" in payload:
+        transaction_date = payload["date"]
+        if not isinstance(transaction_date, str):
+            return None, "date must use YYYY-MM-DD format."
+        try:
+            values["date"] = date_value.fromisoformat(transaction_date).isoformat()
+        except ValueError:
+            return None, "date must use YYYY-MM-DD format."
+
+    if "account_id" in payload:
+        account_id = payload["account_id"]
+        if account_id is None:
+            values["account_id"] = None
+        else:
+            if isinstance(account_id, bool) or (
+                isinstance(account_id, float) and not account_id.is_integer()
+            ):
+                return None, "account_id must be a positive integer or null."
+            try:
+                account_id = int(account_id)
+            except (TypeError, ValueError):
+                return None, "account_id must be a positive integer or null."
+            if account_id <= 0:
+                return None, "account_id must be a positive integer or null."
+            values["account_id"] = account_id
+
+    return values, None
+
+
+def account_belongs_to_user(database, account_id, user_id):
+    if account_id is None:
+        return True
+
+    account = database.execute(
+        "SELECT id FROM accounts WHERE id = ? AND user_id = ?",
+        (account_id, user_id),
+    ).fetchone()
+    return account is not None
+
+
+@app.errorhandler(404)
+def not_found(error):
+    if request.path.startswith("/api/transactions"):
+        return jsonify({"error": "Resource not found."}), 404
+    return error
 
 
 def send_recovery_email(target_email, recovery_link):
@@ -84,22 +202,13 @@ def send_recovery_email(target_email, recovery_link):
 
 @app.route("/")
 def home():
-    database = get_db()
-    transactions = database.execute(
-        "SELECT * FROM transactions ORDER BY date DESC"
-    ).fetchall()
-
-    return render_template(
-        "public/home.html",
-        transactions=transactions,
-        user_id=session.get("user_id"),
-    )
+    return render_template("public/home.html", user_id=session.get("user_id"))
 
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if "user_id" in session:
-        return redirect(url_for("get_transactions"))
+        return redirect(url_for("dashboard"))
 
     error = None
 
@@ -119,7 +228,7 @@ def login():
                 session.clear()
                 session["user_id"] = user["id"]
                 session["username"] = user["username"]
-                return redirect(url_for("get_transactions"))
+                return redirect(url_for("dashboard"))
 
             error = "Invalid username or password."
 
@@ -129,7 +238,7 @@ def login():
 @app.route("/register", methods=["GET", "POST"])
 def register():
     if "user_id" in session:
-        return redirect(url_for("get_transactions"))
+        return redirect(url_for("dashboard"))
 
     error = None
 
@@ -189,91 +298,143 @@ def register():
                     session.clear()
                     session["user_id"] = cursor.lastrowid
                     session["username"] = username
-                    return redirect(url_for("get_transactions"))
+                    return redirect(url_for("dashboard"))
 
     return render_template("auth/register.html", error=error)
 
 
-@app.route("/dashboard", methods=["POST"])
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    return render_template("dashboard/dashboard.html")
+
+
+@app.route("/api/transactions", methods=["POST"])
 @login_required
 def create_transaction():
-    data = request.get_json() or {}
-    title = data.get("title")
-    amount = data.get("amount")
-    transaction_type = data.get("type")
-    category = data.get("category")
-    date = data.get("date")
+    data = request.get_json(silent=True)
+    values, validation_error = validate_transaction_payload(data)
+    if validation_error:
+        return jsonify({"error": validation_error}), 400
 
-    if not data or not title or not amount or not transaction_type or not category or not date:
-        return jsonify({"error": "Missing mandatory field records"}), 400
-
+    user_id = session["user_id"]
     database = get_db()
+    if not account_belongs_to_user(database, values.get("account_id"), user_id):
+        return jsonify({"error": "Account not found."}), 404
+
     cursor = database.execute(
         """
-        INSERT INTO transactions (user_id, title, amount, type, category, date)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO transactions (
+            user_id,
+            account_id,
+            title,
+            description,
+            amount,
+            type,
+            category,
+            date
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (session["user_id"], title, amount, transaction_type, category, date),
+        (
+            user_id,
+            values.get("account_id"),
+            values["title"],
+            values.get("description"),
+            values["amount"],
+            values["type"],
+            values["category"],
+            values["date"],
+        ),
     )
     database.commit()
 
-    return jsonify({"message": "Transaction created", "id": cursor.lastrowid}), 201
+    transaction = database.execute(
+        "SELECT * FROM transactions WHERE id = ? AND user_id = ?",
+        (cursor.lastrowid, user_id),
+    ).fetchone()
+    return jsonify({"transaction": transaction_to_dict(transaction)}), 201
 
 
-@app.route("/dashboard", methods=["GET"])
+@app.route("/api/transactions", methods=["GET"])
 @login_required
 def get_transactions():
     rows = get_db().execute(
-        "SELECT * FROM transactions WHERE user_id = ? ORDER BY date DESC",
+        """
+        SELECT *
+        FROM transactions
+        WHERE user_id = ?
+        ORDER BY date DESC, id DESC
+        """,
         (session["user_id"],),
     ).fetchall()
 
-    transactions = [dict(row) for row in rows]
-    return jsonify(transactions), 200
+    transactions = [transaction_to_dict(row) for row in rows]
+    return jsonify({"transactions": transactions}), 200
 
 
-@app.route("/dashboard/<int:transaction_id>", methods=["PUT"])
+@app.route("/api/transactions/<int:transaction_id>", methods=["PUT"])
 @login_required
 def update_transaction(transaction_id):
+    if transaction_id <= 0:
+        return jsonify({"error": "Invalid transaction ID."}), 400
+
     database = get_db()
     transaction = database.execute(
         "SELECT * FROM transactions WHERE id = ? AND user_id = ?",
         (transaction_id, session["user_id"]),
     ).fetchone()
     if not transaction:
-        return jsonify({"error": "Transaction not found or ownership mismatched"}), 404
+        return jsonify({"error": "Transaction not found."}), 404
 
-    data = request.get_json() or {}
-    title = data.get("title", transaction["title"])
-    amount = data.get("amount", transaction["amount"])
-    transaction_type = data.get("type", transaction["type"])
-    category = data.get("category", transaction["category"])
-    date = data.get("date", transaction["date"])
+    data = request.get_json(silent=True)
+    values, validation_error = validate_transaction_payload(data, partial=True)
+    if validation_error:
+        return jsonify({"error": validation_error}), 400
+
+    account_id = values.get("account_id", transaction["account_id"])
+    if not account_belongs_to_user(database, account_id, session["user_id"]):
+        return jsonify({"error": "Account not found."}), 404
 
     database.execute(
         """
         UPDATE transactions
-        SET title = ?, amount = ?, type = ?, category = ?, date = ?
+        SET account_id = ?,
+            title = ?,
+            description = ?,
+            amount = ?,
+            type = ?,
+            category = ?,
+            date = ?
         WHERE id = ? AND user_id = ?
         """,
         (
-            title,
-            amount,
-            transaction_type,
-            category,
-            date,
+            account_id,
+            values.get("title", transaction["title"]),
+            values.get("description", transaction["description"]),
+            values.get("amount", transaction["amount"]),
+            values.get("type", transaction["type"]),
+            values.get("category", transaction["category"]),
+            values.get("date", transaction["date"]),
             transaction_id,
             session["user_id"],
         ),
     )
     database.commit()
 
-    return jsonify({"message": "Transaction update successfully"}), 200
+    updated_transaction = database.execute(
+        "SELECT * FROM transactions WHERE id = ? AND user_id = ?",
+        (transaction_id, session["user_id"]),
+    ).fetchone()
+    return jsonify({"transaction": transaction_to_dict(updated_transaction)}), 200
 
 
-@app.route("/dashboard/<int:transaction_id>", methods=["DELETE"])
+@app.route("/api/transactions/<int:transaction_id>", methods=["DELETE"])
 @login_required
 def delete_transaction(transaction_id):
+    if transaction_id <= 0:
+        return jsonify({"error": "Invalid transaction ID."}), 400
+
     database = get_db()
     cursor = database.execute(
         "DELETE FROM transactions WHERE id = ? AND user_id = ?",
@@ -282,9 +443,9 @@ def delete_transaction(transaction_id):
     database.commit()
 
     if cursor.rowcount == 0:
-        return jsonify({"error": "Transaction not found or unauthorized"}), 404
+        return jsonify({"error": "Transaction not found."}), 404
 
-    return jsonify({"message": "Transaction deleted seccessfully"}), 200
+    return jsonify({"message": "Transaction deleted successfully."}), 200
 
 
 @app.route("/logout")
