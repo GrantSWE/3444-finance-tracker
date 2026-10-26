@@ -12,7 +12,11 @@ app = Flask(__name__)
 
 app.config.update(
     SECRET_KEY=os.environ.get("SECRET_KEY", "fallback-secure-string-123456"),
-    DATABASE=os.path.join(app.root_path, "finance_tracker.db"),
+    DATABASE=os.environ.get(
+        "DATABASE_PATH",
+        os.path.join(app.root_path, "finance_tracker.db"),
+    ),
+    SCHEMA_PATH=os.path.join(app.root_path, "schema.sql"),
     SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "false").lower() == "true",
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
@@ -32,6 +36,7 @@ def get_db():
     if "db" not in g:
         g.db = sqlite3.connect(app.config["DATABASE"])
         g.db.row_factory = sqlite3.Row
+        g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
 
 
@@ -44,18 +49,8 @@ def close_db(error):
 
 def init_db():
     database = get_db()
-    database.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            full_name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
-        """
-    )
-    database.commit()
+    with open(app.config["SCHEMA_PATH"], encoding="utf-8") as schema_file:
+        database.executescript(schema_file.read())
 
 
 def login_required(view):
@@ -116,11 +111,11 @@ def login():
             error = "Username and password are required."
         else:
             user = get_db().execute(
-                "SELECT id, username, password FROM users WHERE username = ?",
+                "SELECT id, username, password_hash FROM users WHERE username = ?",
                 (username,),
             ).fetchone()
 
-            if user and check_password_hash(user["password"], password):
+            if user and check_password_hash(user["password_hash"], password):
                 session.clear()
                 session["user_id"] = user["id"]
                 session["username"] = user["username"]
@@ -181,7 +176,7 @@ def register():
                 try:
                     cursor = database.execute(
                         """
-                        INSERT INTO users (full_name, email, username, password)
+                        INSERT INTO users (full_name, email, username, password_hash)
                         VALUES (?, ?, ?, ?)
                         """,
                         (full_name, email, username, password_hash),
@@ -298,7 +293,9 @@ def logout():
     return redirect(url_for("home"))
 
 
+with app.app_context():
+    init_db()
+
+
 if __name__ == "__main__":
-    with app.app_context():
-        init_db()
     app.run(debug=True)
