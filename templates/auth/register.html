@@ -70,25 +70,31 @@ Register | Finance Tracker
                     <p>Enter your information below to start tracking your finances.</p>
                 </div>
 
+                {% if error %}
+                <div class="form-alert" role="alert">
+                    {{ error }}
+                </div>
+                {% endif %}
+
                 <form action="{{ url_for('register') }}" method="POST">
 
                     <div class="form-group">
                         <label for="full_name" class="form-label">Full Name</label>
                         <input type="text" id="full_name" name="full_name" class="form-input" placeholder="John Doe"
-                            autocomplete="name" maxlength="80" required>
+                            value="{{ request.form.get('full_name', '') }}" autocomplete="name" maxlength="80" required>
                     </div>
 
                     <div class="form-group">
                         <label for="email" class="form-label">Email</label>
                         <input type="email" id="email" name="email" class="form-input" placeholder="johndoe@gmail.com"
-                            autocomplete="email" maxlength="254" required>
+                            value="{{ request.form.get('email', '') }}" autocomplete="email" maxlength="254" required>
                     </div>
 
                     <div class="form-group">
                         <label for="username" class="form-label">Username</label>
                         <input type="text" id="username" name="username" class="form-input" placeholder="johndoe"
-                            autocomplete="username" minlength="3" maxlength="30" pattern="[A-Za-z0-9_]+"
-                            aria-describedby="username-help" required>
+                            value="{{ request.form.get('username', '') }}" autocomplete="username" minlength="3"
+                            maxlength="30" pattern="[A-Za-z0-9_]+" aria-describedby="username-help" required>
                         <span class="form-help" id="username-help">Use 3–30 letters, numbers, or underscores.</span>
                     </div>
 
