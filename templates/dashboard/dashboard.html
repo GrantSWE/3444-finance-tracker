@@ -1,14 +1,224 @@
 {% extends "layouts/base.html" %}
 
+{% block styles %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+{% endblock %}
+
 {% block title %}
 Dashboard | Finance Tracker
 {% endblock %}
 
 {% block content %}
 
-<section>
-    <h1>Dashboard</h1>
-    <p>Transaction dashboard will starting being built soon ~ Grant</p>
+<section class="dashboard-shell" id="dashboard"
+    data-transactions-url="{{ url_for('get_transactions') }}"
+    data-login-url="{{ url_for('login') }}">
+
+    <div class="dashboard-title">
+        <div>
+            <p class="eyebrow">Welcome back, {{ session.get('username', 'there') }}</p>
+            <h1>Financial Overview</h1>
+        </div>
+
+        <button class="button button-primary" id="add-transaction-button" type="button">
+            Add Transaction
+        </button>
+    </div>
+
+    <div class="dashboard-status" id="dashboard-status" role="status" aria-live="polite">
+        Loading your financial activity...
+    </div>
+
+    <div class="stats-grid" aria-label="Financial summary">
+        <article class="stat-card stat-card--balance">
+            <span>Current Balance</span>
+            <strong id="current-balance">$0.00</strong>
+            <small>Income minus expenses</small>
+        </article>
+
+        <article class="stat-card">
+            <span>Total Income</span>
+            <strong id="total-income">$0.00</strong>
+            <small>All recorded income</small>
+        </article>
+
+        <article class="stat-card">
+            <span>Total Expenses</span>
+            <strong id="total-expenses">$0.00</strong>
+            <small>All tracked spending</small>
+        </article>
+
+        <article class="stat-card">
+            <span>Savings Rate</span>
+            <strong id="savings-rate">0.0%</strong>
+            <small>Balance as a share of income</small>
+        </article>
+    </div>
+
+    <div class="dashboard-grid">
+
+        <section class="panel" aria-labelledby="budget-heading">
+            <div class="panel-header">
+                <h2 id="budget-heading">Budget Progress</h2>
+                <span class="future-badge">Future feature</span>
+            </div>
+
+            <div class="budget-list budget-placeholder">
+                <div class="budget-row" aria-hidden="true">
+                    <div class="budget-label">
+                        <strong>Monthly category budgets</strong>
+                        <span>Not configured</span>
+                    </div>
+                    <div class="progress-track"><span></span></div>
+                </div>
+
+                <p>
+                    Budget tracking will appear here after budget API support is added.
+                    No sample budget values are being shown.
+                </p>
+            </div>
+        </section>
+
+        <section class="panel" aria-labelledby="spending-heading">
+            <div class="panel-header">
+                <h2 id="spending-heading">Spending Snapshot</h2>
+                <span>This month</span>
+            </div>
+
+            <div class="bar-chart" id="spending-chart" aria-label="Expenses grouped by week this month">
+                <span><b>$0</b></span>
+                <span><b>$0</b></span>
+                <span><b>$0</b></span>
+                <span><b>$0</b></span>
+                <span><b>$0</b></span>
+            </div>
+
+            <div class="chart-labels" aria-hidden="true">
+                <span>W1</span>
+                <span>W2</span>
+                <span>W3</span>
+                <span>W4</span>
+                <span>W5</span>
+            </div>
+        </section>
+
+    </div>
+
+    <section class="panel transactions-panel" aria-labelledby="transactions-heading">
+        <div class="panel-header transactions-header">
+            <div>
+                <h2 id="transactions-heading">Recent Transactions</h2>
+                <span id="transaction-count">0 transactions</span>
+            </div>
+
+            <button class="button button-secondary table-add-button" type="button" data-open-transaction-form>
+                Add Transaction
+            </button>
+        </div>
+
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Title</th>
+                        <th>Category</th>
+                        <th>Type</th>
+                        <th>Amount</th>
+                        <th><span class="visually-hidden">Actions</span></th>
+                    </tr>
+                </thead>
+                <tbody id="transactions-body"></tbody>
+            </table>
+
+            <div class="empty-state" id="transactions-empty" hidden>
+                <strong>No transactions yet</strong>
+                <p>Add your first income or expense to start building your financial overview.</p>
+                <button class="button button-primary" type="button" data-open-transaction-form>
+                    Add Your First Transaction
+                </button>
+            </div>
+        </div>
+    </section>
+
 </section>
+
+<dialog class="transaction-dialog" id="transaction-dialog" aria-labelledby="transaction-dialog-title">
+    <form class="transaction-form" id="transaction-form">
+
+        <div class="dialog-header">
+            <div>
+                <span class="eyebrow">Transaction details</span>
+                <h2 id="transaction-dialog-title">Add Transaction</h2>
+            </div>
+
+            <button class="dialog-close" id="close-transaction-dialog" type="button" aria-label="Close form">
+                &times;
+            </button>
+        </div>
+
+        <div class="form-message" id="transaction-form-message" role="alert" hidden></div>
+
+        <div class="transaction-form-grid">
+            <div class="form-field form-field--wide">
+                <label for="transaction-title">Title</label>
+                <input id="transaction-title" name="title" type="text" maxlength="100"
+                    placeholder="Groceries" required>
+            </div>
+
+            <div class="form-field">
+                <label for="transaction-amount">Amount</label>
+                <input id="transaction-amount" name="amount" type="number" min="0.01" step="0.01"
+                    placeholder="0.00" required>
+            </div>
+
+            <div class="form-field">
+                <label for="transaction-type">Type</label>
+                <select id="transaction-type" name="type" required>
+                    <option value="expense">Expense</option>
+                    <option value="income">Income</option>
+                </select>
+            </div>
+
+            <div class="form-field">
+                <label for="transaction-category">Category</label>
+                <input id="transaction-category" name="category" type="text" maxlength="60"
+                    list="transaction-categories" placeholder="Food" required>
+                <datalist id="transaction-categories">
+                    <option value="Salary"></option>
+                    <option value="Interest"></option>
+                    <option value="Other Income"></option>
+                    <option value="Food"></option>
+                    <option value="Housing"></option>
+                    <option value="Transportation"></option>
+                    <option value="Utilities"></option>
+                    <option value="Healthcare"></option>
+                    <option value="Entertainment"></option>
+                    <option value="Shopping"></option>
+                    <option value="Other Expense"></option>
+                </datalist>
+            </div>
+
+            <div class="form-field">
+                <label for="transaction-date">Date</label>
+                <input id="transaction-date" name="date" type="date" required>
+            </div>
+
+            <div class="form-field form-field--wide">
+                <label for="transaction-description">Description <span>(optional)</span></label>
+                <textarea id="transaction-description" name="description" rows="3" maxlength="300"
+                    placeholder="Add a note about this transaction"></textarea>
+            </div>
+        </div>
+
+        <div class="dialog-actions">
+            <button class="button button-secondary" id="cancel-transaction" type="button">Cancel</button>
+            <button class="button button-primary" id="save-transaction" type="submit">Save Transaction</button>
+        </div>
+
+    </form>
+</dialog>
+
+<script src="{{ url_for('static', filename='js/dashboard.js') }}" defer></script>
 
 {% endblock %}
