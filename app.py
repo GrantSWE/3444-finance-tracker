@@ -1,8 +1,8 @@
 import os
 import smtplib
 import sqlite3
-from datetime import date as date_value
-from decimal import Decimal, InvalidOperation
+from datetime import datetime, timezone, date as date_value
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from email.mime.text import MIMEText
 from functools import wraps
 
@@ -40,6 +40,7 @@ def get_db():
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
+
 
 
 @app.teardown_appcontext
@@ -305,10 +306,244 @@ def register():
 
 @app.route("/dashboard")
 @login_required
-def dashboard():
-    return render_template("dashboard/dashboard.html")
 
+def get_category_spending(database, user_id, year_month=None):
+    target_month = year_month or datetime.now().strftime("%Y-%m")
+    rows = database.execute(
+        """
+        WITH monthly_expenses AS (
+            SELECT
+                LOWER(TRIM(category)) AS norm_category,
+                SUM(amount) AS total_spent,
+                COUNT(id) AS transaction_count
+            FROM transactions
+            WHERE user_id = ?
+              AND type = 'expense'
+              AND strftime('%Y-%m', datae) = strftime('%Y-%m', 'now, 'localtime)
+            GROUP BY LOWER(TRIM(category))
+        ),
+        total_monthly AS (
+            SELECT COALESCE(SUM(total_spent), 0) as grand_total
+            FROM monthly_expenses
+        )
+        SELECT
+            c.id as category_id,
+            c.category_name,
+            COALESCE(me.total_spent, 0) AS total_spent,
+            COALESCE(me.transaction_count, 0), as transaction_count,
+            CASE
+                WHEN tm.grand_total > 0
+                THEN ROUND ((COALESCE(me.total_spent, 0) * 100.0) / tm.grand_total, 2)
+                ELSE 0.0
+            END AS pct_of_total_spent
+        FROM categories c
+        LEFT JOIN monthly_expenses me
+            ON LOWER(c.category_name) = me.norm_category
+        CROSS JOIN total_monthly tm
+        WHERE c.category_type = 'expense'
+        ORDER BY total_spent DESC, c.category_name ASC;
+        """,
+        (user_id, target_month),
+    ).feetchall()
+    return [dict(row) for row in rows]
 
+def get_goal_metrics(database, user_id, goal_id):
+    goal = database.execute(
+        """
+        SELECT
+            id,
+            goal_name,
+            target_amount,
+            current_amount,
+            target_date,
+            ROUNT((current_amount*100.0) / target_amount, 2) AS completion_pct
+            MAX(target_amount - current_amount, 0) AS remaining_amount
+        FROM savings_goals
+        WHERE id = ? AND user_id = ?
+        """,
+        (goal_id, user_id),
+    ).fetchone()
+    if not goal:
+        return None
+        
+    milestones = database.execute(
+    """
+    SELECT
+        id,
+        milestone_name,
+        target_amount,
+        target_percentage,
+        is_achieved,
+        achieved_at
+        CASE
+            WHEN ? >= target_amount THEN 100.0
+            ELSE ROUND ((? * 100.0) / target_amount, 2)
+        END AS milestone_progress
+        MAX(target_amount -?, 0) AS amount_to_milestone
+    FROM goal_milestones
+    WHERE goal_id = ? AND user_id = ?
+    ORDER BY target_amount ASC
+    """,
+    (
+        goal["current_amount"],
+        goal_id,
+        user_id,
+    ),
+    ).fetchall()
+    
+    return{
+        "goal": dict(goal)
+        "milestones": [dict(m) for m in milestones],
+    }
+def sync_goal_milestones(database, user_id, goal_id, new_balance):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    database.execute(
+        """
+        UPDATE goal_milestones
+        SET is_achieved = 1,
+            achieved_at = COALESCE(achieved_at, ?)
+        WHERE goal_id = ?
+        AND user_id = ?
+        AND is_achieved = 0
+        AND target_amount <= ?
+        """,
+        (now_iso, goal_id, user_id, float(new_balance)),
+    )
+
+def execute_saving_allocation(
+    database,
+    user_id,
+    total_deposit_amount,
+    source_account_id = None,
+    transaction_id = None,
+):
+    remaining_pool = Decimal(str(total_deposit_amount)).quantize(
+        Decimal("0.01"), rounding=ROUND_HALF_UP
+    )
+    if remaining_pool <= 0:
+        raise ValueError("Allocation deposit amount must be greater than zero.")
+
+    rules = database.execute(
+        """
+        SELECT
+            r.id,
+            r.goal_id,
+            r.source_account_id,
+            r.allocation_type,
+            r.allocation_value,
+            g.current_amount,
+            g.target_amount
+        FROM saving_allocation_rules r
+        JOIN savings_goals g ON r.goal_id = g.id
+        WHERE r.user_id = ?
+          AND r.is_active = 1
+        ORDER BY r.priority_order ASC, r.id ASC
+        """,
+        (user_id,),
+    ).fetchall()
+
+    if not rules:
+        return []
+
+    allocations_made = []
+    initial_pool = remaining_pool
+     try:
+        for rule in rules:
+            if remaining_pool <= Decimal("0.00"):
+                break
+
+            rule_value = Decimal(str(rule["allocation_value"]))
+            if rule["allocation_type"] == "percentage":
+                desired_amount = (initial_pool * rule_value / Decimal("100")).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+            else:
+                desired_amount = rule_value.quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+
+            # Cap at remaining deposit pool and remaining goal gap
+            goal_gap = max(
+                Decimal(str(rule["target_amount"])) - Decimal(str(rule["current_amount"])),
+                Decimal("0.00"),
+            )
+            alloc_amount = min(desired_amount, remaining_pool, goal_gap)
+
+            if alloc_amount <= Decimal("0.00"):
+                continue
+
+            acct_id = source_account_id or rule["source_account_id"]
+
+            # Deduct from source account if linked
+            if acct_id is not None:
+                acct = database.execute(
+                    "SELECT balance FROM accounts WHERE id = ? AND user_id = ?",
+                    (acct_id, user_id),
+                ).fetchone()
+                if not acct:
+                    raise ValueError(f"Source account {acct_id} not found.")
+                if Decimal(str(acct["balance"])) < alloc_amount:
+                    raise ValueError(f"Insufficient funds in account {acct_id}.")
+
+                database.execute(
+                    "UPDATE accounts SET balance = balance - ? WHERE id = ? AND user_id = ?",
+                    (float(alloc_amount), acct_id, user_id),
+                )
+
+            # Update savings goal balance
+            new_goal_balance = Decimal(str(rule["current_amount"])) + alloc_amount
+            database.execute(
+                """
+                UPDATE savings_goals
+                SET current_amount = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (float(new_goal_balance), rule["goal_id"], user_id),
+            )
+
+            # Record allocation ledger entry
+            cursor = database.execute(
+                """
+                INSERT INTO saving_allocations (
+                    user_id,
+                    goal_id,
+                    rule_id,
+                    source_account_id,
+                    transaction_id,
+                    allocated_amount
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    rule["goal_id"],
+                    rule["id"],
+                    acct_id,
+                    transaction_id,
+                    float(alloc_amount),
+                ),
+            )
+
+            # Check and unlock any reached milestones
+            _sync_goal_milestones(database, user_id, rule["goal_id"], new_goal_balance)
+
+            remaining_pool -= alloc_amount
+            allocations_made.append(
+                {
+                    "allocation_id": cursor.lastrowid,
+                    "goal_id": rule["goal_id"],
+                    "allocated_amount": float(alloc_amount),
+                    "new_goal_balance": float(new_goal_balance),
+                }
+            )
+
+        database.commit()
+        return allocations_made
+    except Exception:
+        database.rollback()
+        raise
+        
+        
 @app.route("/api/transactions", methods=["POST"])
 @login_required
 def create_transaction():
