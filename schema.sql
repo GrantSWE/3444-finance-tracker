@@ -131,3 +131,35 @@ INSERT OR IGNORE INTO categories (category_name, category_type) VALUES
     ('Entertainment', 'expense'),
     ('Shopping', 'expense'),
     ('Other Expense', 'expense');
+
+WITH monthly_expenses AS (
+	SELECT
+		LOWER(TRIM(categoru)) AS norm_category,
+		SUM(amount) AS total_spent,
+		COUNT(id) AS transaction_count
+	FROM transactions
+	WHERE user_id = ?
+	  AND type = 'expense'
+	  and strftime('%Y-%m', datae) = strftime('%Y-%m', 'now, 'localtime)
+	GROUP BY LOWER(TRIM(category))
+),
+total_monthly AS (
+	SELECT COALESCE(SUM(total_spent), 0) as grand_total
+	FROM monthly_expenses
+)
+SELECT
+	c.id as category_id,
+	c.category_name,
+	COALESCE(me.total_spent, 0) AS total_spent,
+	COALESCE(me.transaction_count, 0), as transaction_count,
+	CASE
+		WHEN tm.grand_total > 0
+		THEN ROUND ((COALESCE(me.total_spent, 0) * 100.0) / tm.grand_total, 2)
+		ELSE 0.0
+	END AS pct_of_total_spent
+FROM categories c
+LEFT JOIN monthly_expenses me
+	ON LOWER(c.category_name) = me.norm_category
+CROSS JOIN total_monthly tm
+WHERE c.category_type = 'expense'
+ORDER BY total_spent DESC, c.category_name ASC;
