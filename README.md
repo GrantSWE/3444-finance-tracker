@@ -56,3 +56,36 @@ Parent accounts will have management access to linked child accounts, while chil
 The core Flask project structure has been established, and the public homepage, shared layouts, partials, and styling have been implemented. The project repository is now set up for group development.
 
 Current development is focused on building the authentication system, including login and registration, followed by the SQLite database and dashboard functionality.
+
+## Password Recovery Configuration
+
+The password recovery flow sends a one-time link that expires after 15 minutes by default. Copy the values from `.env.example` into your local environment and replace every placeholder before sending real email.
+
+Required production settings:
+
+- `SECRET_KEY`: a long random value used to sign recovery tokens and sessions
+- `APP_BASE_URL`: the public application URL, including `https://`
+- `MAIL_USERNAME` and `MAIL_PASSWORD`: SMTP credentials (use an app password when required)
+- `MAIL_DEFAULT_SENDER`: the address shown in recovery email
+- `SESSION_COOKIE_SECURE=true`: required when the deployed site uses HTTPS
+
+For local PowerShell development, set a variable for the current terminal before starting Flask:
+
+```powershell
+$env:SECRET_KEY = "replace-with-a-long-random-value"
+$env:MAIL_USERNAME = "your-email@example.com"
+$env:MAIL_PASSWORD = "your-email-app-password"
+$env:MAIL_DEFAULT_SENDER = "your-email@example.com"
+$env:APP_BASE_URL = "http://127.0.0.1:5000"
+python app.py
+```
+
+Do not commit real passwords or a production `SECRET_KEY`.
+
+## Tests
+
+Run all token, password-recovery, authentication, dashboard, and transaction regression tests with:
+
+```powershell
+python -m unittest discover -s tests -v
+```

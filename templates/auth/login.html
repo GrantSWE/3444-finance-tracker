@@ -76,6 +76,12 @@ Log In | Finance Tracker
                 </div>
                 {% endif %}
 
+                {% if success %}
+                <div class="form-alert form-alert--success" role="status">
+                    {{ success }}
+                </div>
+                {% endif %}
+
                 <form action="{{ url_for('login') }}" method="POST">
 
                     <div class="form-group">
@@ -89,6 +95,9 @@ Log In | Finance Tracker
                         <label for="password" class="form-label">Password</label>
                         <input type="password" id="password" name="password" class="form-input" placeholder="••••••••"
                             autocomplete="current-password" maxlength="128" required>
+                        <span class="form-help form-help--link">
+                            <a href="{{ url_for('forgot_password') }}">Forgot your password?</a>
+                        </span>
                     </div>
 
                     <button class="button button-primary auth-submit" type="submit">

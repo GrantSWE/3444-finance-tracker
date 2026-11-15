@@ -1,19 +1,22 @@
 import os
+import secrets
 import smtplib
 import sqlite3
-from datetime import datetime, timezone, date as date_value
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from datetime import date as date_value, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from email.mime.text import MIMEText
 from functools import wraps
 
 from flask import Flask, g, jsonify, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from token_service import generate_recovery_token, hash_token, verify_recovery_token
+
 
 app = Flask(__name__)
 
 app.config.update(
-    SECRET_KEY=os.environ.get("SECRET_KEY", "fallback-secure-string-123456"),
+    SECRET_KEY=os.environ.get("SECRET_KEY") or secrets.token_hex(32),
     DATABASE=os.environ.get(
         "DATABASE_PATH",
         os.path.join(app.root_path, "finance_tracker.db"),
@@ -30,7 +33,9 @@ app.config.update(
         "MAIL_DEFAULT_SENDER",
         "FINANCETRACKEREMAIL@GMAIL.COM",
     ),
-    APP_BASE_URL=os.environ.get("APP_BASE_URL", "127.0.0.1:5000"),
+    APP_BASE_URL=os.environ.get("APP_BASE_URL", "http://127.0.0.1:5000"),
+    PASSWORD_RESET_TOKEN_TTL=int(os.environ.get("PASSWORD_RESET_TOKEN_TTL", 900)),
+    MAIL_SUPPRESS_SEND=False,
 )
 
 
@@ -40,7 +45,6 @@ def get_db():
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys = ON")
     return g.db
-
 
 
 @app.teardown_appcontext
@@ -68,6 +72,53 @@ def login_required(view):
         return view(*args, **kwargs)
 
     return decorated_function
+
+
+def validate_password(password):
+    if len(password) < 9:
+        return "Password must be at least 9 characters long."
+    if len(password) > 128:
+        return "Password must be no more than 128 characters long."
+    if not any(character.isdigit() for character in password):
+        return "Password must include at least one number."
+    if not any(
+        not character.isalnum() and not character.isspace()
+        for character in password
+    ):
+        return "Password must include at least one special character."
+    return None
+
+
+def build_recovery_link(token):
+    base_url = app.config["APP_BASE_URL"].rstrip("/")
+    return f"{base_url}{url_for('reset_password', token=token)}"
+
+
+def get_active_password_reset(database, token):
+    payload = verify_recovery_token(token, app.config["SECRET_KEY"])
+    if payload is None:
+        return None
+
+    reset_record = database.execute(
+        """
+        SELECT id, user_id, expires_at, used
+        FROM password_resets
+        WHERE token_hash = ? AND used = 0
+        """,
+        (hash_token(token),),
+    ).fetchone()
+    if reset_record is None or reset_record["user_id"] != payload["user_id"]:
+        return None
+
+    try:
+        expires_at = datetime.fromisoformat(reset_record["expires_at"])
+    except (TypeError, ValueError):
+        return None
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) >= expires_at:
+        return None
+    return reset_record
 
 
 def transaction_to_dict(transaction):
@@ -185,6 +236,9 @@ def not_found(error):
 
 
 def send_recovery_email(target_email, recovery_link):
+    if app.config["MAIL_SUPPRESS_SEND"]:
+        return
+
     message = MIMEText(
         "Hello,\n\n"
         "You requested a password reset. Use this link to verify your identity:\n"
@@ -195,7 +249,11 @@ def send_recovery_email(target_email, recovery_link):
     message["From"] = app.config["MAIL_DEFAULT_SENDER"]
     message["To"] = target_email
 
-    with smtplib.SMTP(app.config["MAIL_SERVER"], app.config["MAIL_PORT"]) as server:
+    with smtplib.SMTP(
+        app.config["MAIL_SERVER"],
+        app.config["MAIL_PORT"],
+        timeout=10,
+    ) as server:
         server.starttls()
         server.login(app.config["MAIL_USERNAME"], app.config["MAIL_PASSWORD"])
         server.send_message(message)
@@ -233,7 +291,10 @@ def login():
 
             error = "Invalid username or password."
 
-    return render_template("auth/login.html", error=error)
+    success = None
+    if request.args.get("reset") == "success":
+        success = "Your password has been reset. You can now log in."
+    return render_template("auth/login.html", error=error, success=success)
 
 
 @app.route("/register", methods=["GET", "POST"])
@@ -248,18 +309,12 @@ def register():
         email = request.form.get("email", "").strip().lower()
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
+        password_error = validate_password(password)
 
         if not full_name or not email or not username or not password:
             error = "All fields are required."
-        elif len(password) < 9:
-            error = "Password must be at least 9 characters long."
-        elif not any(character.isdigit() for character in password):
-            error = "Password must include at least one number."
-        elif not any(
-            not character.isalnum() and not character.isspace()
-            for character in password
-        ):
-            error = "Password must include at least one special character."
+        elif password_error:
+            error = password_error
         else:
             database = get_db()
             existing_user = database.execute(
@@ -304,246 +359,151 @@ def register():
     return render_template("auth/register.html", error=error)
 
 
-@app.route("/dashboard")
-@login_required
+@app.route("/forgot-password", methods=["GET", "POST"])
+def forgot_password():
+    message = None
+    error = None
 
-def get_category_spending(database, user_id, year_month=None):
-    target_month = year_month or datetime.now().strftime("%Y-%m")
-    rows = database.execute(
-        """
-        WITH monthly_expenses AS (
-            SELECT
-                LOWER(TRIM(category)) AS norm_category,
-                SUM(amount) AS total_spent,
-                COUNT(id) AS transaction_count
-            FROM transactions
-            WHERE user_id = ?
-              AND type = 'expense'
-              AND strftime('%Y-%m', datae) = strftime('%Y-%m', 'now, 'localtime)
-            GROUP BY LOWER(TRIM(category))
-        ),
-        total_monthly AS (
-            SELECT COALESCE(SUM(total_spent), 0) as grand_total
-            FROM monthly_expenses
-        )
-        SELECT
-            c.id as category_id,
-            c.category_name,
-            COALESCE(me.total_spent, 0) AS total_spent,
-            COALESCE(me.transaction_count, 0), as transaction_count,
-            CASE
-                WHEN tm.grand_total > 0
-                THEN ROUND ((COALESCE(me.total_spent, 0) * 100.0) / tm.grand_total, 2)
-                ELSE 0.0
-            END AS pct_of_total_spent
-        FROM categories c
-        LEFT JOIN monthly_expenses me
-            ON LOWER(c.category_name) = me.norm_category
-        CROSS JOIN total_monthly tm
-        WHERE c.category_type = 'expense'
-        ORDER BY total_spent DESC, c.category_name ASC;
-        """,
-        (user_id, target_month),
-    ).feetchall()
-    return [dict(row) for row in rows]
+    if request.method == "POST":
+        identity = request.form.get("identity", "").strip()
+        if not identity:
+            error = "Enter your email address or username."
+        else:
+            database = get_db()
+            user = database.execute(
+                """
+                SELECT id, email
+                FROM users
+                WHERE email = ? OR username = ?
+                """,
+                (identity.lower(), identity),
+            ).fetchone()
 
-def get_goal_metrics(database, user_id, goal_id):
-    goal = database.execute(
-        """
-        SELECT
-            id,
-            goal_name,
-            target_amount,
-            current_amount,
-            target_date,
-            ROUNT((current_amount*100.0) / target_amount, 2) AS completion_pct
-            MAX(target_amount - current_amount, 0) AS remaining_amount
-        FROM savings_goals
-        WHERE id = ? AND user_id = ?
-        """,
-        (goal_id, user_id),
-    ).fetchone()
-    if not goal:
-        return None
-        
-    milestones = database.execute(
-    """
-    SELECT
-        id,
-        milestone_name,
-        target_amount,
-        target_percentage,
-        is_achieved,
-        achieved_at
-        CASE
-            WHEN ? >= target_amount THEN 100.0
-            ELSE ROUND ((? * 100.0) / target_amount, 2)
-        END AS milestone_progress
-        MAX(target_amount -?, 0) AS amount_to_milestone
-    FROM goal_milestones
-    WHERE goal_id = ? AND user_id = ?
-    ORDER BY target_amount ASC
-    """,
-    (
-        goal["current_amount"],
-        goal_id,
-        user_id,
-    ),
-    ).fetchall()
-    
-    return{
-        "goal": dict(goal)
-        "milestones": [dict(m) for m in milestones],
-    }
-def sync_goal_milestones(database, user_id, goal_id, new_balance):
-    now_iso = datetime.now(timezone.utc).isoformat()
-    database.execute(
-        """
-        UPDATE goal_milestones
-        SET is_achieved = 1,
-            achieved_at = COALESCE(achieved_at, ?)
-        WHERE goal_id = ?
-        AND user_id = ?
-        AND is_achieved = 0
-        AND target_amount <= ?
-        """,
-        (now_iso, goal_id, user_id, float(new_balance)),
-    )
-
-def execute_saving_allocation(
-    database,
-    user_id,
-    total_deposit_amount,
-    source_account_id = None,
-    transaction_id = None,
-):
-    remaining_pool = Decimal(str(total_deposit_amount)).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
-    )
-    if remaining_pool <= 0:
-        raise ValueError("Allocation deposit amount must be greater than zero.")
-
-    rules = database.execute(
-        """
-        SELECT
-            r.id,
-            r.goal_id,
-            r.source_account_id,
-            r.allocation_type,
-            r.allocation_value,
-            g.current_amount,
-            g.target_amount
-        FROM saving_allocation_rules r
-        JOIN savings_goals g ON r.goal_id = g.id
-        WHERE r.user_id = ?
-          AND r.is_active = 1
-        ORDER BY r.priority_order ASC, r.id ASC
-        """,
-        (user_id,),
-    ).fetchall()
-
-    if not rules:
-        return []
-
-    allocations_made = []
-    initial_pool = remaining_pool
-     try:
-        for rule in rules:
-            if remaining_pool <= Decimal("0.00"):
-                break
-
-            rule_value = Decimal(str(rule["allocation_value"]))
-            if rule["allocation_type"] == "percentage":
-                desired_amount = (initial_pool * rule_value / Decimal("100")).quantize(
-                    Decimal("0.01"), rounding=ROUND_HALF_UP
+            if user is not None:
+                token_ttl = app.config["PASSWORD_RESET_TOKEN_TTL"]
+                token = generate_recovery_token(
+                    user["id"],
+                    app.config["SECRET_KEY"],
+                    expires_in=token_ttl,
                 )
-            else:
-                desired_amount = rule_value.quantize(
-                    Decimal("0.01"), rounding=ROUND_HALF_UP
-                )
-
-            # Cap at remaining deposit pool and remaining goal gap
-            goal_gap = max(
-                Decimal(str(rule["target_amount"])) - Decimal(str(rule["current_amount"])),
-                Decimal("0.00"),
-            )
-            alloc_amount = min(desired_amount, remaining_pool, goal_gap)
-
-            if alloc_amount <= Decimal("0.00"):
-                continue
-
-            acct_id = source_account_id or rule["source_account_id"]
-
-            # Deduct from source account if linked
-            if acct_id is not None:
-                acct = database.execute(
-                    "SELECT balance FROM accounts WHERE id = ? AND user_id = ?",
-                    (acct_id, user_id),
-                ).fetchone()
-                if not acct:
-                    raise ValueError(f"Source account {acct_id} not found.")
-                if Decimal(str(acct["balance"])) < alloc_amount:
-                    raise ValueError(f"Insufficient funds in account {acct_id}.")
+                expires_at = datetime.now(timezone.utc) + timedelta(seconds=token_ttl)
 
                 database.execute(
-                    "UPDATE accounts SET balance = balance - ? WHERE id = ? AND user_id = ?",
-                    (float(alloc_amount), acct_id, user_id),
+                    """
+                    UPDATE password_resets
+                    SET used = 1
+                    WHERE user_id = ? AND used = 0
+                    """,
+                    (user["id"],),
                 )
-
-            # Update savings goal balance
-            new_goal_balance = Decimal(str(rule["current_amount"])) + alloc_amount
-            database.execute(
-                """
-                UPDATE savings_goals
-                SET current_amount = ?
-                WHERE id = ? AND user_id = ?
-                """,
-                (float(new_goal_balance), rule["goal_id"], user_id),
-            )
-
-            # Record allocation ledger entry
-            cursor = database.execute(
-                """
-                INSERT INTO saving_allocations (
-                    user_id,
-                    goal_id,
-                    rule_id,
-                    source_account_id,
-                    transaction_id,
-                    allocated_amount
+                database.execute(
+                    """
+                    INSERT INTO password_resets (user_id, token_hash, expires_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (user["id"], hash_token(token), expires_at.isoformat()),
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    user_id,
-                    rule["goal_id"],
-                    rule["id"],
-                    acct_id,
-                    transaction_id,
-                    float(alloc_amount),
-                ),
+                database.commit()
+
+                try:
+                    send_recovery_email(user["email"], build_recovery_link(token))
+                except (OSError, smtplib.SMTPException):
+                    app.logger.exception("Unable to send password recovery email.")
+                    database.execute(
+                        """
+                        UPDATE password_resets
+                        SET used = 1
+                        WHERE token_hash = ?
+                        """,
+                        (hash_token(token),),
+                    )
+                    database.commit()
+
+            message = (
+                "If an account matches that information, a password recovery "
+                "link has been sent."
             )
 
-            # Check and unlock any reached milestones
-            _sync_goal_milestones(database, user_id, rule["goal_id"], new_goal_balance)
+    return render_template(
+        "auth/forgot_password.html",
+        error=error,
+        message=message,
+    )
 
-            remaining_pool -= alloc_amount
-            allocations_made.append(
-                {
-                    "allocation_id": cursor.lastrowid,
-                    "goal_id": rule["goal_id"],
-                    "allocated_amount": float(alloc_amount),
-                    "new_goal_balance": float(new_goal_balance),
-                }
-            )
 
-        database.commit()
-        return allocations_made
-    except Exception:
-        database.rollback()
-        raise
-        
-        
+@app.route("/reset-password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    database = get_db()
+    reset_record = get_active_password_reset(database, token)
+    if reset_record is None:
+        return render_template("auth/reset_password.html", invalid=True), 400
+
+    error = None
+    if request.method == "POST":
+        password = request.form.get("password", "")
+        confirm_password = request.form.get("confirm_password", "")
+        error = validate_password(password)
+        if error is None and password != confirm_password:
+            error = "Passwords do not match."
+
+        if error is None:
+            try:
+                database.execute("BEGIN IMMEDIATE")
+                reset_record = get_active_password_reset(database, token)
+                if reset_record is None:
+                    database.rollback()
+                    return render_template("auth/reset_password.html", invalid=True), 400
+
+                cursor = database.execute(
+                    """
+                    UPDATE password_resets
+                    SET used = 1
+                    WHERE id = ? AND used = 0
+                    """,
+                    (reset_record["id"],),
+                )
+                if cursor.rowcount != 1:
+                    database.rollback()
+                    return render_template("auth/reset_password.html", invalid=True), 400
+
+                password_hash = generate_password_hash(
+                    password,
+                    method="pbkdf2:sha256",
+                    salt_length=16,
+                )
+                database.execute(
+                    "UPDATE users SET password_hash = ? WHERE id = ?",
+                    (password_hash, reset_record["user_id"]),
+                )
+                database.execute(
+                    """
+                    UPDATE password_resets
+                    SET used = 1
+                    WHERE user_id = ? AND used = 0
+                    """,
+                    (reset_record["user_id"],),
+                )
+                database.commit()
+            except sqlite3.DatabaseError:
+                database.rollback()
+                raise
+
+            session.clear()
+            return redirect(url_for("login", reset="success"))
+
+    return render_template(
+        "auth/reset_password.html",
+        error=error,
+        invalid=False,
+    )
+
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    return render_template("dashboard/dashboard.html")
+
+
 @app.route("/api/transactions", methods=["POST"])
 @login_required
 def create_transaction():
