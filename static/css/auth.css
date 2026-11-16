@@ -150,6 +150,12 @@
   line-height: 1.5;
 }
 
+.form-alert--success {
+  border-color: rgba(31, 138, 97, 0.28);
+  color: var(--green-dark);
+  background: rgba(31, 138, 97, 0.08);
+}
+
 .form-label {
   display: block;
   margin-bottom: 8px;
@@ -184,6 +190,19 @@
   margin-top: 7px;
   color: var(--muted);
   font-size: 0.78rem;
+}
+
+.form-help--link {
+  text-align: right;
+}
+
+.form-help--link a {
+  color: var(--green-dark);
+  font-weight: 700;
+}
+
+.form-help--link a:hover {
+  text-decoration: underline;
 }
 
 .password-requirements {
@@ -297,6 +316,21 @@
   width: 100%;
   cursor: pointer;
   font: inherit;
+}
+
+.auth-button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+.auth-container--compact .auth-grid {
+  min-height: 560px;
+}
+
+.auth-grid--compact .auth-info-box {
+  display: none;
 }
 
 .auth-switch {
